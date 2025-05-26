@@ -29,7 +29,7 @@ def cal_accuracy(ground_truth_list, predictions_list):
 
 def get_jga_scores(output_dir, dataset_order):
     JGA_list = []
-    #print("Calculating JGA score for each service.....")
+
     acc_task_num = 0
     for service_id in range(0, len(dataset_order)-1):
         #print(service_id)
@@ -117,7 +117,7 @@ if __name__=='__main__':
     #model_name = "flant5xllora"
     model_name = "llama2-13Blora"
     
-    method_name = "bilevel"
+    method_name = "RKIF"
 
     parser = argparse.ArgumentParser()
     # 所有可能用到的参数

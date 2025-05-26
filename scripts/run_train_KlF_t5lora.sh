@@ -12,7 +12,7 @@ do
 
         CUDA_VISIBLE_DEVICES=1 python src/finetune_KlF_t5lora.py \
             --base_model 'your_model_path' \
-            --method_name 'KlF' \
+            --method_name 'RKIF' \
             --num_epochs=10 \
             --dataset_id=${data_id} \
             --task_id=${ORDER} \

@@ -13,7 +13,7 @@ do
             --base_model 'your_model_path' \
             --dataset_id=${data_id} \
             --service_begin_id=${ORDER} \
-            --method_name='KlF' \
+            --method_name='RKIF' \
             --model_type='' \
             
         # 可以在这里添加任何你需要的其他操作，如等待一段时间等

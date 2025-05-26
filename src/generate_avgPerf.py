@@ -1,4 +1,3 @@
-# 生成计算averageJGA指标所需要的预测结果
 
 import os
 import sys

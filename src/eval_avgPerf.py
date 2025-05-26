@@ -31,7 +31,7 @@ def cal_accuracy(ground_truth_list, predictions_list):
 
 def main(args):
     dataset_order = get_dataset_order(args.dataset_id)
-    # 遍历15个service，计算当前dataset id下的average JGA值
+    # 遍历15个service，计算当前dataset id下的值
 
     output_dir = os.path.join("./output", args.model_name + "_" + args.method_name + "_dataset_id_" + str(args.dataset_id) + "_avgPerf")
     if not os.path.exists(output_dir):
@@ -41,7 +41,7 @@ def main(args):
     avgPerf_list = []
     service_name_list = []
     #print(f"predict result dir: {output_dir}")
-    #print("Calculating JGA score for each service.....")
+
     acc_task_num = 0
     for service_id in range(0, len(dataset_order)):
         print(f"task name: {dataset_order[service_id]}")
@@ -101,7 +101,7 @@ if __name__=='__main__':
     #model_name = "flant5xllora"
     model_name = "llama2-13Blora"
     
-    method_name = "bilevel"
+    method_name = "RKIF"
 
 
     parser = argparse.ArgumentParser()

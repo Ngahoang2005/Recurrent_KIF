@@ -5,7 +5,7 @@ do
     CUDA_VISIBLE_DEVICES=2 python src/generate_avgPerf.py \
         --base_model 'your_model_path' \
         --dataset_id=${data_id} \
-        --method_name='KlF' \
+        --method_name='RKIF' \
         --model_type='' \
 
 done

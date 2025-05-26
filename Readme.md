@@ -1,29 +1,37 @@
 # Recurrent Knowledge Localization and Fusion for Language Model Continual Learning
-Thank you for your interest in our work! This repository contains the original implementation of "Recurrent Knowledge Localization and Fusion for Language Model Continual Learning".
+Thank you for your interest in our work! This is the original implementation of our ACL 2025 paper, ["Recurrent Knowledge Identification and Fusion for Language Model Continual Learning"](https://arxiv.org/abs/2502.17510).
+
+We also invite you to explore our previous work on continual learning, available [here](https://github.com/WoodScene/TaSL).
 
 Reproducing the results from our paper is straightforward—just follow the steps outlined below.
 
 ## Local Setup
 ```
-conda create -n KLF python=3.7
-conda activate KLF
+conda create -n RKIF python=3.8
+conda activate RKIF
 pip install -r requirements.txt
 ```
 
+> **Important:**
+> Please ensure the following package versions:
+>
+> * `transformers==4.28.1`
+> * `peft==0.4.0`
+
+Then, replace the corresponding files in the `transformers` package (typically located at `anaconda_path/envs/RKIF/lib/python3.8/site-packages/transformers/`) with the modified versions of `trainer.py` and `training_args.py`.
+These modifications are required to support our **Recurrent Knowledge Identification and Fusion** framework.
+
+> Detailed comments are included in the modified files to help you understand the changes.
+
+
 ## Step 1. Preliminary Preparation
 The data preprocessing pipeline follows the approach described in [O-LoRA](https://github.com/cmnfriend/O-LoRA). The implementation can be found in the `/data` folder. If you're interested in the preprocessing details, please refer to `data/preprocess.py`. For convenience, we also provide pre-processed datasets ready for use.
-
 
 Download the required backbone models from Hugging Face:
 * [T5-large](https://huggingface.co/google-t5/t5-large)
 * [Flan-T5-xl](https://huggingface.co/google/flan-t5-xl)
 * [LLaMA2-7B](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf)
 * [LLaMA2-13B](https://huggingface.co/meta-llama/Llama-2-13b-chat-hf)
-
-Replace the corresponding files in the Transformers package (usually located at `anaconda_path/envs/KLF/lib/python3.7/site-packages/transformers/`) with the latest versions of `trainer.py` and `training_args.py`. We’ve modified these files to implement our Recurrent Knowledge Localization and Fusion method.
-
-If you're interested in the modifications, detailed comments have been added to the code for clarity.
-
 
 
 ## Step 2. Training Recurrent-KlF
@@ -65,3 +73,15 @@ To calculate the metrics, execute:
 ```
 
 We hope you find this repository useful! If you encounter any issues or have questions, feel free to open an issue or contact us.
+
+
+## Citation
+If this work proves beneficial or use our code for your research, citing our paper would be greatly appreciated.
+```ruby
+@article{feng2025recurrent,
+  title={Recurrent knowledge identification and fusion for language model continual learning},
+  author={Feng, Yujie and Wang, Xujia and Lu, Zexin and Fu, Shenghong and Shi, Guangyuan and Xu, Yongxin and Wang, Yasha and Yu, Philip S and Chu, Xu and Wu, Xiao-Ming},
+  journal={arXiv preprint arXiv:2502.17510},
+  year={2025}
+}
+```

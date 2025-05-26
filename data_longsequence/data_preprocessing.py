@@ -59,7 +59,7 @@ instruction_dic = {
 
 # 配置文件夹路径
 tasks_folder = './CL_Benchmark/Long_Sequence'
-output_folder = './data_longsequence_llama'
+output_folder = './data_longsequence'
 train_folder = os.path.join(output_folder, 'train')
 val_folder = os.path.join(output_folder, 'dev')
 test_folder = os.path.join(output_folder, 'test')

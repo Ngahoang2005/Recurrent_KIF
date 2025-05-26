@@ -12,7 +12,7 @@ do
 
         CUDA_VISIBLE_DEVICES=0 python src/finetune_KlF_llama.py \
             --base_model 'your_model_path' \
-            --method_name 'KlF' \
+            --method_name 'RKIF' \
             --num_epochs=10 \
             --cutoff_len=512 \
             --group_by_length \
