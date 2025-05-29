@@ -34,16 +34,16 @@ Download the required backbone models from Hugging Face:
 * [LLaMA2-13B](https://huggingface.co/meta-llama/Llama-2-13b-chat-hf)
 
 
-## Step 2. Training Recurrent-KlF
-### T5 Series Models (`./src/finetune_KlF_t5lora.py`)
+## Step 2. Training Recurrent-KIF
+### T5 Series Models (`./src/finetune_KIF_t5lora.py`)
 To fine-tune T5 models, run:
 ```ruby
-./scripts/run_train_KlF_t5lora.sh
+./scripts/run_train_KIF_t5lora.sh
 ```
-### LLaMA-2-7B and 13B (`./src/finetune_KlF_llama.py`)
+### LLaMA-2-7B and 13B (`./src/finetune_KIF_llama.py`)
 To fine-tune LLaMA-2-7B or LLaMA-2-13B models, run:
 ```ruby
-./scripts_llama/run_train_KlF_llama.sh
+./scripts_llama/run_train_KIF_llama.sh
 ```
 Note:
 * Use the `model_path` argument to specify the location of your downloaded models.
@@ -55,11 +55,11 @@ We evaluate our model using two metrics: Overall Performance (OP) and Backward T
 
 ### **Overall Performance**
 ```ruby
-./scripts/run_test_KlF_t5lora_avgPer.sh
+./scripts/run_test_KIF_t5lora_avgPer.sh
 ```
 ### Backward Transfer (**BWT**)
 ```ruby
-./scripts/run_test_KlF_t5lora_avgPer.sh
+./scripts/run_test_KIF_t5lora_avgPer.sh
 ```
 The prediction results will be stored in the `$output` folder.
 
