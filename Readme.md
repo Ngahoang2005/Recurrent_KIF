@@ -68,7 +68,7 @@ The prediction results will be stored in the `$output` folder.
 ## Step 4. Evaluation
 To calculate the metrics, execute:
 ```ruby
-./src/eval_avgJGA.py
+./src/eval_avgPerf.py
 ./src/eval_bwt.py
 ```
 
