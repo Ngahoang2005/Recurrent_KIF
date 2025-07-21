@@ -1,7 +1,7 @@
 # Recurrent Knowledge Identification and Fusion for Language Model Continual Learning
 Thank you for your interest in our work! This is the original implementation of our ACL 2025 paper, ["Recurrent Knowledge Identification and Fusion for Language Model Continual Learning"](https://arxiv.org/abs/2502.17510).
 
-We also invite you to explore our previous work on continual learning, available [here](https://github.com/WoodScene/TaSL).
+We also invite you to explore our previous work on continual learning, [TaSL](https://github.com/WoodScene/TaSL), which is the predecessor of Recurrent KIF and was published at ACL 2024.
 
 Reproducing the results from our paper is straightforward—just follow the steps outlined below.
 
