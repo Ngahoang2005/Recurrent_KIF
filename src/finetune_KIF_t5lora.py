@@ -23,7 +23,7 @@ import torch.nn as nn
 import bitsandbytes as bnb
 """
 import time
-from utils.lora_importance_bilevel import RankAllocator
+from ..utils.lora_importance_bilevel import RankAllocator
 from peft import (
     LoraConfig,
     get_peft_model,
