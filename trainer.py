@@ -37,6 +37,8 @@ import math
 import os
 import random
 import re
+import torch.nn.functional as F
+
 import shutil
 import sys
 import time
@@ -1863,595 +1865,105 @@ class Trainer:
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
     ):
         self._train_batch_size = batch_size
-        #self._train_batch_size_outer = batch_size_outer
-        # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
-        if self.train_dataset_memory is not None:
-            train_dataloader_memory = self.get_memory_dataloader()
-        # 这里只需要添加上面这一句，下面出现的和train_dataloader相关的代码，一直到epoch 入口为止，都不需要对train_dataloader_memory进行处理
 
-        # feng: 下面这部分代码就是在设置训练控制变量，它们包括训练的 epoch 数量、每个 epoch 中的训练步数、总的训练步数等。
-        # Setting up training control variables:
-        # number of training epochs: num_train_epochs
-        # number of training steps per epoch: num_update_steps_per_epoch
-        # total number of training steps to execute: max_steps
+        # Thiết lập biến training control
         total_train_batch_size = args.train_batch_size * args.gradient_accumulation_steps * args.world_size
+        len_dataloader = len(train_dataloader) if hasattr(train_dataloader, "__len__") else None
 
-        len_dataloader = None
-        if has_length(train_dataloader):
-            len_dataloader = len(train_dataloader)
-            num_update_steps_per_epoch = len_dataloader // args.gradient_accumulation_steps
-            num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1)
-            num_examples = self.num_examples(train_dataloader)
+        if len_dataloader is not None:
+            num_update_steps_per_epoch = max(len_dataloader // args.gradient_accumulation_steps, 1)
             if args.max_steps > 0:
                 max_steps = args.max_steps
                 num_train_epochs = args.max_steps // num_update_steps_per_epoch + int(
                     args.max_steps % num_update_steps_per_epoch > 0
                 )
-                # May be slightly incorrect if the last batch in the training dataloader has a smaller size but it's
-                # the best we can do.
                 num_train_samples = args.max_steps * total_train_batch_size
             else:
                 max_steps = math.ceil(args.num_train_epochs * num_update_steps_per_epoch)
                 num_train_epochs = math.ceil(args.num_train_epochs)
-                num_train_samples = self.num_examples(train_dataloader) * args.num_train_epochs
-        elif args.max_steps > 0:  # Rely on max_steps when dataloader does not have a working size
-            max_steps = args.max_steps
-            # Setting a very large number of epochs so we go as many times as necessary over the iterator.
-            num_train_epochs = sys.maxsize
-            num_update_steps_per_epoch = max_steps
-            num_examples = total_train_batch_size * args.max_steps
-            num_train_samples = args.max_steps * total_train_batch_size
+                num_train_samples = len_dataloader * args.num_train_epochs
         else:
-            raise ValueError(
-                "args.max_steps must be set to a positive value if dataloader does not have a length, was"
-                f" {args.max_steps}"
-            )
+            raise ValueError("Dataloader must have a length or specify max_steps > 0")
 
-        if DebugOption.UNDERFLOW_OVERFLOW in self.args.debug:
-            if self.args.n_gpu > 1:
-                # nn.DataParallel(model) replicates the model, creating new variables and module
-                # references registered here no longer work on other gpus, breaking the module
-                raise ValueError(
-                    "Currently --debug underflow_overflow is not supported under DP. Please use DDP"
-                    " (torch.distributed.launch)."
-                )
-            else:
-                debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
-
-        delay_optimizer_creation = (
-            self.sharded_ddp is not None
-            and self.sharded_ddp != ShardedDDPOption.SIMPLE
-            or is_sagemaker_mp_enabled()
-            or self.fsdp is not None
-        )
-        if args.deepspeed:
-            deepspeed_engine, optimizer, lr_scheduler = deepspeed_init(
-                self, num_training_steps=max_steps, resume_from_checkpoint=resume_from_checkpoint
-            )
-            self.model = deepspeed_engine.module
-            self.model_wrapped = deepspeed_engine
-            self.deepspeed = deepspeed_engine
-            self.optimizer = optimizer
-            self.lr_scheduler = lr_scheduler
-        elif not delay_optimizer_creation:
+        # Tạo optimizer và scheduler
+        if not args.deepspeed:
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
         self.state = TrainerState()
-        self.state.is_hyper_param_search = trial is not None
-
-        # Activate gradient checkpointing if needed
-        if args.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-
         model = self._wrap_model(self.model_wrapped)
-        
-        if self.train_dataset_memory is not None and self.ipt_score is not None: 
-            self.ipt_score.set_total_step(max_steps)
 
-        if is_sagemaker_mp_enabled() and resume_from_checkpoint is not None:
-            self._load_from_checkpoint(resume_from_checkpoint, model)
-
-        # for the rest of this function `model` is the outside model, whether it was wrapped or not
-        if model is not self.model:
-            self.model_wrapped = model
-
-        if delay_optimizer_creation:
-            self.create_optimizer_and_scheduler(num_training_steps=max_steps)
-
-        # Check if saved optimizer or scheduler states exist
-        self._load_optimizer_and_scheduler(resume_from_checkpoint)
-
-        # important: at this point:
-        # self.model         is the Transformers Model
-        # self.model_wrapped is DDP(Transformers Model), Deepspeed(Transformers Model), etc.
-
-        # Train!
+        # Train loop
         logger.info("***** Running training *****")
-        logger.info(f"  Num examples = {num_examples:,}")
-        logger.info(f"  Num Epochs = {num_train_epochs:,}")
-        logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size:,}")
-        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size:,}")
-        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-        logger.info(f"  Total optimization steps = {max_steps:,}")
-        logger.info(f"  Number of trainable parameters = {get_model_param_count(model, trainable_only=True):,}")
+        logger.info(f"  Num Epochs = {num_train_epochs}")
+        logger.info(f"  Total optimization steps = {max_steps}")
 
         self.state.epoch = 0
-        start_time = time.time()
-        epochs_trained = 0
-        steps_trained_in_current_epoch = 0
-        steps_trained_progress_bar = None
-
-        # Check if continuing training from a checkpoint
-        if resume_from_checkpoint is not None and os.path.isfile(
-            os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)
-        ):
-            self.state = TrainerState.load_from_json(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME))
-            epochs_trained = self.state.global_step // num_update_steps_per_epoch
-            if not args.ignore_data_skip:
-                steps_trained_in_current_epoch = self.state.global_step % (num_update_steps_per_epoch)
-                steps_trained_in_current_epoch *= args.gradient_accumulation_steps
-            else:
-                steps_trained_in_current_epoch = 0
-
-            logger.info("  Continuing training from checkpoint, will skip to saved global_step")
-            logger.info(f"  Continuing training from epoch {epochs_trained}")
-            logger.info(f"  Continuing training from global step {self.state.global_step}")
-            if not args.ignore_data_skip:
-                if skip_first_batches is None:
-                    logger.info(
-                        f"  Will skip the first {epochs_trained} epochs then the first"
-                        f" {steps_trained_in_current_epoch} batches in the first epoch. If this takes a lot of time,"
-                        " you can install the latest version of Accelerate with `pip install -U accelerate`.You can"
-                        " also add the `--ignore_data_skip` flag to your launch command, but you will resume the"
-                        " training on data already seen by your model."
-                    )
-                else:
-                    logger.info(
-                        f"  Will skip the first {epochs_trained} epochs then the first"
-                        f" {steps_trained_in_current_epoch} batches in the first epoch."
-                    )
-                if self.is_local_process_zero() and not args.disable_tqdm and skip_first_batches is None:
-                    steps_trained_progress_bar = tqdm(total=steps_trained_in_current_epoch)
-                    steps_trained_progress_bar.set_description("Skipping the first batches")
-
-        # Update the references
-        self.callback_handler.model = self.model
-        self.callback_handler.optimizer = self.optimizer
-        self.callback_handler.lr_scheduler = self.lr_scheduler
-        self.callback_handler.train_dataloader = train_dataloader
-        if self.hp_name is not None and self._trial is not None:
-            # use self._trial because the SigOpt/Optuna hpo only call `_hp_search_setup(trial)` instead of passing trial
-            # parameter to Train when using DDP.
-            self.state.trial_name = self.hp_name(self._trial)
-        if trial is not None:
-            assignments = trial.assignments if self.hp_search_backend == HPSearchBackend.SIGOPT else trial
-            self.state.trial_params = hp_params(assignments)
-        else:
-            self.state.trial_params = None
-        # This should be the same if the state has been saved but in case the training arguments changed, it's safer
-        # to set this after the load.
-        self.state.max_steps = max_steps
-        self.state.num_train_epochs = num_train_epochs
-        self.state.is_local_process_zero = self.is_local_process_zero()
-        self.state.is_world_process_zero = self.is_world_process_zero()
-
-        # tr_loss is a tensor to avoid synchronization of TPUs through .item()
         tr_loss = torch.tensor(0.0).to(args.device)
-        # _total_loss_scalar is updated everytime .item() has to be called on tr_loss and stores the sum of all losses
         self._total_loss_scalar = 0.0
         self._globalstep_last_logged = self.state.global_step
         model.zero_grad()
 
         self.control = self.callback_handler.on_train_begin(args, self.state, self.control)
 
-        # Skip the first epochs_trained epochs to get the random state of the dataloader at the right point.
-        if not args.ignore_data_skip:
-            for epoch in range(epochs_trained):
-                is_random_sampler = hasattr(train_dataloader, "sampler") and isinstance(
-                    train_dataloader.sampler, RandomSampler
-                )
-                if is_torch_less_than_1_11 or not is_random_sampler:
-                    # We just need to begin an iteration to create the randomization of the sampler.
-                    # That was before PyTorch 1.11 however...
-                    for _ in train_dataloader:
-                        break
-                else:
-                    # Otherwise we need to call the whooooole sampler cause there is some random operation added
-                    # AT THE VERY END!
-                    _ = list(train_dataloader.sampler)
-
-        total_batched_samples = 0
-
-        # 初始化参数
         theta_t = {n: p.clone() for n, p in model.named_parameters() if "lora_" in n}
-        #print(theta_t['base_model.model.decoder.block.23.layer.1.EncDecAttention.q.lora_A.default.weight'])
-        # feng: epoch 入口
-        for epoch in range(epochs_trained, num_train_epochs):
-            if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
-                train_dataloader.sampler.set_epoch(epoch)
-            elif hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDatasetShard):
-                train_dataloader.dataset.set_epoch(epoch)
 
-            # feng: 按照上面同样设置 train_dataloader_memory 的分布式采样器
-            if self.train_dataset_memory is not None:
-                if isinstance(train_dataloader_memory, DataLoader) and isinstance(train_dataloader_memory.sampler, DistributedSampler):
-                    train_dataloader_memory.sampler.set_epoch(epoch)
-                elif hasattr(train_dataloader_memory, "dataset") and isinstance(train_dataloader_memory.dataset, IterableDatasetShard):
-                    train_dataloader_memory.dataset.set_epoch(epoch)
-
-            if is_torch_tpu_available():
-                parallel_loader = pl.ParallelLoader(train_dataloader, [args.device]).per_device_loader(args.device)
-                epoch_iterator = parallel_loader
-            else:
-                epoch_iterator = train_dataloader
-
-            # Reset the past mems state at the beginning of each epoch if necessary.
-            if args.past_index >= 0:
-                self._past = None
-
-            steps_in_epoch = (
-                len(epoch_iterator)
-                if len_dataloader is not None
-                else args.max_steps * args.gradient_accumulation_steps
-            )
+        for epoch in range(num_train_epochs):
+            epoch_iterator = train_dataloader
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
 
-            if epoch == epochs_trained and resume_from_checkpoint is not None and steps_trained_in_current_epoch == 0:
-                self._load_rng_state(resume_from_checkpoint)
-
-            rng_to_sync = False
-            steps_skipped = 0
-            if skip_first_batches is not None and steps_trained_in_current_epoch > 0:
-                epoch_iterator = skip_first_batches(epoch_iterator, steps_trained_in_current_epoch)
-                steps_skipped = steps_trained_in_current_epoch
-                steps_trained_in_current_epoch = 0
-                rng_to_sync = True
-
-            step = -1
-            # feng: training step入口，我们需要修改这里
-            # epoch_iterator 是基于 train_dataloader 而创建的，以适应不同的硬件或分布式训练场景。
             for step, inputs in enumerate(epoch_iterator):
-                total_batched_samples += 1
-                if rng_to_sync:
-                    self._load_rng_state(resume_from_checkpoint)
-                    rng_to_sync = False
+                model.train()
+                loss = self.training_step(model, inputs)
+                tr_loss += loss
 
-                # Skip past any already trained steps if resuming training
-                if steps_trained_in_current_epoch > 0:
-                    steps_trained_in_current_epoch -= 1
-                    if steps_trained_progress_bar is not None:
-                        steps_trained_progress_bar.update(1)
-                    if steps_trained_in_current_epoch == 0:
-                        self._load_rng_state(resume_from_checkpoint)
-                    continue
-                elif steps_trained_progress_bar is not None:
-                    steps_trained_progress_bar.close()
-                    steps_trained_progress_bar = None
-
-                if step % args.gradient_accumulation_steps == 0:
-                    self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
-
-                if (
-                    (total_batched_samples % args.gradient_accumulation_steps != 0)
-                    and args.local_rank != -1
-                    and args._no_sync_in_gradient_accumulation
-                ):
-                    # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
-                    with model.no_sync():
-                        tr_loss_step = self.training_step(model, inputs)
-                else:
-                    tr_loss_step = self.training_step(model, inputs)
-
-                # 累积损失
-                if (
-                    args.logging_nan_inf_filter
-                    and not is_torch_tpu_available()
-                    and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
-                ):
-                    # if loss is nan or inf simply add the average of previous logged losses
-                    tr_loss += tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
-                else:
-                    tr_loss += tr_loss_step
-
-                # 计算 FLOPs
-                self.current_flos += float(self.floating_point_ops(inputs))
-
-                # Optimizer step for deepspeed must be called on every step regardless of the value of gradient_accumulation_steps
-                if self.deepspeed:
-                    self.deepspeed.step()
-
-                # 执行优化步骤
-                if total_batched_samples % args.gradient_accumulation_steps == 0 or (
-                    # last step in epoch but step is always smaller than gradient_accumulation_steps
-                    steps_in_epoch <= args.gradient_accumulation_steps
-                    and (step + 1) == steps_in_epoch
-                ):
-                    # Gradient clipping
-                    if args.max_grad_norm is not None and args.max_grad_norm > 0 and not self.deepspeed:
-                        # deepspeed does its own clipping
-
-                        if self.do_grad_scaling:
-                            # Reduce gradients first for XLA
-                            if is_torch_tpu_available():
-                                gradients = xm._fetch_gradients(self.optimizer)
-                                xm.all_reduce("sum", gradients, scale=1.0 / xm.xrt_world_size())
-                            # AMP: gradients need unscaling
-                            self.scaler.unscale_(self.optimizer)
-
-                        if is_sagemaker_mp_enabled() and args.fp16:
-                            self.optimizer.clip_master_grads(args.max_grad_norm)
-                        elif hasattr(self.optimizer, "clip_grad_norm"):
-                            # Some optimizers (like the sharded optimizer) have a specific way to do gradient clipping
-                            self.optimizer.clip_grad_norm(args.max_grad_norm)
-                        elif hasattr(model, "clip_grad_norm_"):
-                            # Some models (like FullyShardedDDP) have a specific way to do gradient clipping
-                            model.clip_grad_norm_(args.max_grad_norm)
-                        else:
-                            # Revert to normal clipping otherwise, handling Apex or full precision
-                            nn.utils.clip_grad_norm_(
-                                amp.master_params(self.optimizer) if self.use_apex else model.parameters(),
-                                args.max_grad_norm,
-                            )
-
-                    # print(f"内层循环梯度：")
-                    # for name, param in model.named_parameters():
-                    #     if "lora_" in name:
-                    #         if param.grad is not None:
-                    #             print(f"Grad for {name}: {param.grad.mean()}")
-                    #         else:
-                    #             print(f"No grad for {name}")
-                    # print()
-
-
-                    # Optimizer step
-                    optimizer_was_run = True
-                    if self.deepspeed:
-                        pass  # called outside the loop
-                    elif is_torch_tpu_available():
-                        if self.do_grad_scaling:
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                        else:
-                            xm.optimizer_step(self.optimizer)
-                    elif self.do_grad_scaling:
-                        scale_before = self.scaler.get_scale()
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        scale_after = self.scaler.get_scale()
-                        optimizer_was_run = scale_before <= scale_after
-                    else:
-                        # 这个进行参数更新
-                        self.optimizer.step()
-
-                    if optimizer_was_run and not self.deepspeed:
-                        self.lr_scheduler.step()
-
-                    if self.train_dataset_memory is not None and self.ipt_score is not None:
-                        self.ipt_score.update_inner_score(self.model, self.state.global_step)
-
-                    
+                if (step + 1) % args.gradient_accumulation_steps == 0:
+                    self.optimizer.step()
+                    self.lr_scheduler.step()
                     model.zero_grad()
-                    # 增加全局步数
                     self.state.global_step += 1
-                    #print(f"global_step: {self.state.global_step}")
-                    
-                    self.state.epoch = epoch + (step + 1 + steps_skipped) / steps_in_epoch
-                    self.control = self.callback_handler.on_step_end(args, self.state, self.control)
 
-                    # feng: 在这里新增慢循环
-                    # 检查是否需要进行外层优化
-                    if self.train_dataset_memory is not None and self.ipt_score is not None and self.state.global_step % self._inner_iterations == 0:
-                        # 执行外层优化，使用 memory dataset
-
-                        # 保存当前模型参数 theta_t(k) (version2 new1)
+                    # ===== OUTER LOOP (Knowledge Distillation) =====
+                    if self.teacher_model is not None and self.state.global_step % self._inner_iterations == 0:
                         theta_tk = {n: p.clone() for n, p in model.named_parameters() if "lora_" in n}
-                        #print(theta_tk)
-                        #print("外层循环开始时，theta_tk中某个adapter的参数：")
-                        #print(theta_tk['base_model.model.decoder.block.23.layer.1.EncDecAttention.q.lora_A.default.weight'])
-        
-                        #sys.exit(1)
-                        # 在执行外层循环前，先计算delta_in = theta_t(k) - theta_t (version2 new2)
                         delta_in = {n: (theta_tk[n] - theta_t[n]) for n in theta_tk}
-    
 
-                        for setp_outer in range(self.outer_iterations):
-                            memory_dataloader_iter = iter(train_dataloader_memory)
-                            # 在每次外层循环需要使用 memory 时
-                            try:
-                                memory_inputs = next(memory_dataloader_iter)
-                            except StopIteration:
-                                # 如果迭代器耗尽，则重新创建
-                                memory_dataloader_iter = iter(train_dataloader_memory)
-                                memory_inputs = next(memory_dataloader_iter)
+                        for _ in range(self.outer_iterations):
+                            # KD loss: so sánh student với teacher
+                            kd_inputs = inputs.copy()
+                            with torch.no_grad():
+                                teacher_outputs = self.teacher_model(**kd_inputs)
+                            student_outputs = model(**kd_inputs)
 
-                            #memory_inputs = self._prepare_inputs(memory_inputs)
+                            T = getattr(self, "kd_temperature", 1.0)
+                            kd_loss = F.kl_div(
+                                F.log_softmax(student_outputs.logits / T, dim=-1),
+                                F.softmax(teacher_outputs.logits / T, dim=-1),
+                                reduction="batchmean",
+                            ) * (T * T)
 
-                            # 如果在分布式环境下，需要同步梯度
-                            if args.local_rank != -1 and args._no_sync_in_gradient_accumulation:
-                                with model.no_sync():
-                                    # 外层训练步骤，计算损失并进行反向传播
-                                    outer_loss = self.compute_loss(self.model, memory_inputs)
-                                    outer_loss.backward()
-                            else:
-                                # 走的这里
-                                #print("计算损失，反向传播")
-                                outer_loss = self.training_step(model, memory_inputs)
-                                # outer_loss = self.compute_loss(self.model, memory_inputs)
-                                # outer_loss.backward()
+                            kd_loss.backward()
+                            self.outer_optimizer.step()
+                            self.outer_optimizer.zero_grad()
 
-                            # 梯度裁剪
-                            if args.max_grad_norm is not None and args.max_grad_norm > 0 and not self.deepspeed:
-                                if self.do_grad_scaling:
-                                    if is_torch_tpu_available():
-                                        # 针对 XLA 的 AMP 梯度裁剪
-                                        gradients = xm._fetch_gradients(self.outer_optimizer)
-                                        xm.all_reduce("sum", gradients, scale=1.0 / xm.xrt_world_size())
-                                    self.scaler.unscale_(self.outer_optimizer)
-                                    print("来了2")
-
-                                if is_sagemaker_mp_enabled() and args.fp16:
-                                    self.outer_optimizer.clip_master_grads(args.max_grad_norm)
-                                    print("来了3")
-                                elif hasattr(self.outer_optimizer, "clip_grad_norm"):
-                                    # Some optimizers (like the sharded optimizer) have a specific way to do gradient clipping
-                                    self.outer_optimizer.clip_grad_norm(args.max_grad_norm)
-                                    print("来了4")
-                                elif hasattr(model, "clip_grad_norm_"):
-                                    # Some models (like FullyShardedDDP) have a specific way to do gradient clipping
-                                    model.clip_grad_norm_(args.max_grad_norm)
-                                    print("来了5")
-                                else:
-                                    # 否则，使用常规梯度裁剪方式
-                                    nn.utils.clip_grad_norm_(
-                                        amp.master_params(self.optimizer) if self.use_apex else model.parameters(),
-                                        args.max_grad_norm,
-                                    )
-                                    # 执行的这里的裁剪
-                                    # feng: 忘了吧这里的self.optimizer换成self.outer_optimizer了
-                                    #print("来了6")
-
-                            # 打印梯度
-                            # print(f"setp_outer: {setp_outer}")
-                            # for name, param in model.named_parameters():
-                            #     if "lora_" in name:
-                            #         if param.grad is not None:
-                            #             print(f"Grad for {name}: {param.grad.mean()}")
-                            #         else:
-                            #             print(f"No grad for {name}")
-                            # print()
-                            
-                            # 执行优化器更新
-                            optimizer_was_run = True
-                            if self.deepspeed:
-                                pass  # called outside the loop
-                            elif is_torch_tpu_available():
-                                if self.do_grad_scaling:
-                                    self.scaler.step(self.outer_optimizer)
-                                    self.scaler.update()
-                                else:
-                                    xm.optimizer_step(self.outer_optimizer)
-                            elif self.do_grad_scaling:
-                                scale_before = self.scaler.get_scale()
-                                self.scaler.step(self.outer_optimizer)
-                                self.scaler.update()
-                                scale_after = self.scaler.get_scale()
-                                optimizer_was_run = scale_before <= scale_after
-                            else:
-                                # 这个进行参数更新
-                                #print("外层参数更新来了")
-                                #print("优化器绑定的需要优化的参数：")
-                                #print(self.outer_optimizer.param_groups)
-                                self.optimizer.step()
-                            
-                            # 计算外层参数重要性分布
                             self.ipt_score.update_outer_score(self.model, self.state.global_step)
 
-
-                            # 清空梯度
-                            model.zero_grad()
-
-                            # 分布式同步
-                            if args.local_rank != -1:
-                                torch.distributed.barrier()  # 在所有设备上进行同步，确保参数一致
-                            #print("外层迭代结束！")
-
-                        # 外层迭代结束后计算 delta_out = theta_t(M) - theta_t(k) (version2 new3)
                         delta_out = {n: (p.clone() - theta_tk[n]) for n, p in model.named_parameters() if "lora_" in n}
-
-                        # print("外层循环结束后，该adapter的参数：")
-                        # for n, p in model.named_parameters():
-                        #     if n == "base_model.model.decoder.block.23.layer.1.EncDecAttention.q.lora_A.default.weight":
-                        #         print(p.clone())
-                        #sys.exit(1)
-
-                        # 使用 alpha 和 beta 对 delta_in 和 delta_out 进行加权 更新模型参数
                         self.update_parameters_with_task_vectors(theta_t, delta_in, delta_out)
-
-                        if self.save_ipt_and_vector_results:
-                            self.ipt_score.save_results(delta_in, delta_out)
-
-
-                        # 记录新的theta_t+1
                         theta_t = {n: p.clone() for n, p in model.named_parameters() if "lora_" in n}
-                        # 同时清空内外层的重要性分布 （可选）
-                        if self.empty_inner_score_flag == 1:
-                            self.ipt_score.empty_inner_score()
-                        if self.empty_outer_score_flag == 1:
-                            self.ipt_score.empty_outer_score()
-                            
+                    # ===============================================
 
-                    # 日志和保存的处理
-                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
-                else:
-                    self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
-
-                if self.control.should_epoch_stop or self.control.should_training_stop:
-                    break
-            if step < 0:
-                logger.warning(
-                    "There seems to be not a single sample in your epoch_iterator, stopping training at step"
-                    f" {self.state.global_step}! This is expected if you're using an IterableDataset and set"
-                    f" num_steps ({max_steps}) higher than the number of available samples."
-                )
-                self.control.should_training_stop = True
+                    self.control = self.callback_handler.on_step_end(args, self.state, self.control)
+                    if self.control.should_training_stop:
+                        break
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
-            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
-
-            if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
-                if is_torch_tpu_available():
-                    # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
-                    xm.master_print(met.metrics_report())
-                else:
-                    logger.warning(
-                        "You enabled PyTorch/XLA debug metrics but you don't have a TPU "
-                        "configured. Check your training configuration if this is unexpected."
-                    )
             if self.control.should_training_stop:
                 break
 
-        if args.past_index and hasattr(self, "_past"):
-            # Clean the state at the end of training
-            delattr(self, "_past")
-
-        logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
-        if args.load_best_model_at_end and self.state.best_model_checkpoint is not None:
-            # Wait for everyone to get here so we are sur the model has been saved by process 0.
-            if is_torch_tpu_available():
-                xm.rendezvous("load_best_model_at_end")
-            elif args.local_rank != -1:
-                dist.barrier()
-            elif is_sagemaker_mp_enabled():
-                smp.barrier()
-
-            self._load_best_model()
-
-        # add remaining tr_loss
-        self._total_loss_scalar += tr_loss.item()
-        train_loss = self._total_loss_scalar / self.state.global_step
-
-        metrics = speed_metrics("train", start_time, num_samples=num_train_samples, num_steps=self.state.max_steps)
-        self.store_flos()
-        metrics["total_flos"] = self.state.total_flos
-        metrics["train_loss"] = train_loss
-
-        self.is_in_train = False
-
-        self._memory_tracker.stop_and_update_metrics(metrics)
-
+        train_loss = self._total_loss_scalar / max(1, self.state.global_step)
+        metrics = {"train_loss": train_loss}
         self.log(metrics)
-
-        run_dir = self._get_output_dir(trial)
-        checkpoints_sorted = self._sorted_checkpoints(use_mtime=False, output_dir=run_dir)
-
-        # Delete the last checkpoint when save_total_limit=1 if it's different from the best checkpoint and process allowed to save.
-        if self.args.should_save and self.state.best_model_checkpoint is not None and self.args.save_total_limit == 1:
-            for checkpoint in checkpoints_sorted:
-                if checkpoint != self.state.best_model_checkpoint:
-                    logger.info(f"Deleting older checkpoint [{checkpoint}] due to args.save_total_limit")
-                    shutil.rmtree(checkpoint)
-
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
 
         return TrainOutput(self.state.global_step, train_loss, metrics)
