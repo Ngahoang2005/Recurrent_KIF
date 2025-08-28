@@ -171,7 +171,7 @@ from .utils import (
     logging,
     strtobool,
 )
-from .utils.generic import ContextManagers
+from utils.generic import ContextManagers
 
 
 _is_native_cpu_amp_available = is_torch_greater_or_equal_than_1_10
